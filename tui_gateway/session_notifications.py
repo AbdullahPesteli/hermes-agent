@@ -134,7 +134,11 @@ def _notification_event_dedup_key(evt: dict) -> tuple:
 
 # Mirror gateway/kanban_watchers.py TERMINAL_KINDS: claim silent kinds (archived/unblocked) too so the cursor advances
 # past them and they can't wedge a later completed/blocked event behind an unclaimed row.
-_KANBAN_NOTIFY_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked")
+_KANBAN_NOTIFY_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked",
+                        # Decision events, mirroring gateway/kanban_watchers_notifier.py TERMINAL_KINDS: a review
+                        # handoff, a reviewer's rework request and the repeated-block breaker each need the owning
+                        # TUI/Desktop session woken, or the continuity chain stops where a human is waiting.
+                        "review_requested", "changes_requested", "block_loop_detected")
 # kanban, /loop + /heartbeat and the bot mailbox share one idle-poll cadence; probing the lease registry on
 # every 0.5s queue timeout cost ~a core at 11 sessions (#108005).
 _KANBAN_POLL_SECONDS = _LOOP_POLL_SECONDS = _BOT_DELIVERY_POLL_SECONDS = 5.0
@@ -341,6 +345,38 @@ def _kb_timed_out(task, payload: dict, title: str) -> str:
     return " timed out (max_runtime=0s); will retry"
 
 
+def _kb_review_requested(task, payload: dict, title: str) -> str:
+    """Implementation done, card moved to the review lane. Carries the handoff into
+    the wake like ``completed`` so the reviewer needn't re-read the board."""
+    handoff = _kb_first_line(payload["summary"], 200) if payload.get("summary") else ""
+    return f" ready for review — {title}{handoff}"
+
+
+def _kb_changes_requested(task, payload: dict, title: str) -> str:
+    """A reviewer returned the card to its implementer. This is a BLOCK, not an
+    approval: name the reason and the provenance so the wake is actionable."""
+    reason = " ".join(str(payload.get("reason") or "").split())[:160] or "reviewer feedback requires changes"
+    suffix = ""
+    if reviewer := " ".join(str(payload.get("reviewer") or "").split())[:48]:
+        suffix += f" — reviewer @{reviewer}"
+    if implementer := " ".join(str(payload.get("implementer") or "").split())[:48]:
+        suffix += f" → implementer @{implementer}"
+    return f" review requested changes/BLOCK: {reason}{suffix}"
+
+
+def _kb_block_loop_detected(task, payload: dict, title: str) -> str:
+    """Re-blocked for the same cause past the limit and routed to ``triage``. It emits
+    no blocked/status event, so this is the only signal orchestration is stuck."""
+    why = ("needs a human decision" if str(payload.get("kind") or "") == "needs_input"
+           else "for orchestration attention")
+    recurrences = ""
+    with contextlib.suppress(TypeError, ValueError):
+        if (count := int(payload.get("recurrences") or 0)) > 0:
+            recurrences = f" (blocked {count}x for the same cause)"
+    reason = " ".join(str(payload.get("reason") or "").split())[:160]
+    return f" routed to TRIAGE — {why}{recurrences}" + (f": {reason}" if reason else "")
+
+
 # kind -> (glyph, suffix after "Kanban <id>"); silent kinds (archived/unblocked) are absent → None.
 _KANBAN_EVENT_FORMATTERS = {
     "completed": ("✔", _kb_completed),
@@ -350,6 +386,11 @@ _KANBAN_EVENT_FORMATTERS = {
     "crashed": ("✖", lambda t, p, title: " worker crashed (pid gone); dispatcher will retry"),
     "timed_out": ("⏱", _kb_timed_out),
     "status": ("🔄", lambda t, p, title: f" → {p.get('status') or ''}"),
+    # Decision events: the gateway notifier wakes its chats on these (_WAKE_KINDS),
+    # so the TUI/Desktop owner must not be left asleep behind Telegram (#59890 follow-up).
+    "review_requested": ("👀", _kb_review_requested),
+    "changes_requested": ("🛑", _kb_changes_requested),
+    "block_loop_detected": ("🛑", _kb_block_loop_detected),
 }
 
 
