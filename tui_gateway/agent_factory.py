@@ -623,6 +623,41 @@ def _startup_system_prompt(cfg: dict, task_id: str) -> str:
     return system_prompt
 
 
+def _local_dm_session_key(session_id: str | None, session: dict | None) -> str | None:
+    """Canonical local Bot Chat key for a Desktop/TUI turn, or None for a non-local surface.
+
+    The agent's lazy ``_ensure_db_session`` persists the row with ``session_key=agent._gateway_session_key``.
+    The TUI server always runs a local Desktop surface, so its turns must stamp the same canonical key
+    (``agent:<profile>:local:dm:<id>``) that the gateway local source / local migration resolve to —
+    otherwise remotely-authenticated (served basic-login) turns birth ``source='desktop'`` rows with a NULL
+    ``session_key``, which the host's own local Desktop later cannot open (``4001 not_found``; #139818).
+    """
+    if not session_id:
+        return None
+    import contextlib
+    platform = _resolve_agent_platform(None)
+    if platform not in ("desktop", "tui"):
+        return None
+    profile = None
+    with contextlib.suppress(Exception):
+        from hermes_constants import profile_name_for_home
+        profile = profile_name_for_home((session or {}).get("profile_home")) or None
+    if not profile:
+        with contextlib.suppress(Exception):
+            from hermes_cli.profiles import get_active_profile_name
+            profile = get_active_profile_name() or None
+    # The canonical key reserves the "main" slot for the default profile; build_session_key only emits it
+    # when profile is None (the literal strings "main"/"default" encode as distinct named profiles).
+    if profile in ("main", "default"):
+        profile = None
+    with contextlib.suppress(Exception):
+        from gateway.session import SessionSource, build_session_key
+        from gateway.config import Platform as _Platform
+        source = SessionSource(platform=_Platform.LOCAL, chat_id=session_id, chat_type="dm", profile=profile)
+        return build_session_key(source, profile=profile)
+    return None
+
+
 def _make_agent(
     sid: str, key: str, session_id: str | None = None, session_db=None,
     model_override: dict | str | None = None, provider_override: str | None = None,
@@ -653,6 +688,9 @@ def _make_agent(
     ignore_rules = is_truthy_value(os.environ.get("HERMES_IGNORE_RULES"))
     with _sessions_lock:
         session = _sessions.get(sid)
+    # Stamp the canonical local Bot Chat key so remotely-authenticated turns persist a routed row instead of
+    # a NULL-session_key 'desktop' row the host local Desktop cannot resume (#139818 create-time stamping).
+    local_session_key = _local_dm_session_key(session_id or key, session)
     agent = AIAgent(
         model=model, max_iterations=_cfg_max_turns(cfg, 500), provider=runtime.get("provider"),
         requested_provider=runtime.get("requested_provider"),
@@ -674,6 +712,7 @@ def _make_agent(
         # The dashboard login identity reaches memory providers as the runtime user, like a gateway user id.
         # Builds that run before the record exists (branch, eager resume, compute host) pass it explicitly.
         user_id=auth_user_id if auth_user_id is not None else _session_auth_user_id(session),
+        gateway_session_key=local_session_key,
         session_db=session_db if session_db is not None else _get_db(), ephemeral_system_prompt=system_prompt or None,
         checkpoints_enabled=_resolve_checkpoints_enabled(cfg),
         pass_session_id=is_truthy_value(os.environ.get("HERMES_TUI_PASS_SESSION_ID")),
