@@ -863,7 +863,11 @@ class AuthorityConnection:
             # a finite viewer reads its ledger (tokens, cost, model, exit reason) from here, the same
             # dict the in-process one-shot wrote from `run_conversation`.
             from gateway.session_results import admission_result
-            saved = admission_result(self.authority.db, receipt.admission_id)
+            live = self.authority.sessions[ref.session_id]
+            saved = await asyncio.to_thread(admission_result, self.authority.db, receipt.admission_id)
+            if self.authority.sessions.get(ref.session_id) is not live:
+                raise RuntimeStoreError('not_found')
+            self.authority.authorize(self.actor, ref, 'session:submit')
             if saved is not None:
                 out['result'] = saved['result']
                 out['usage'] = saved.get('usage') or {}
