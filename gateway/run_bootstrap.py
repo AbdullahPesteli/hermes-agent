@@ -641,7 +641,7 @@ def _start_gateway_install_signal_handlers(loop, shutdown_signal_handler, restar
 
 
 async def _start_gateway_run_runner(runner, _signal_initiated_shutdown: list) -> Optional[bool]:
-    """MCP discovery, then ``runner.start()``. Returns the exit verdict when the process must end
+    """Start platforms without waiting for background MCP discovery. Returns the exit verdict when the process must end
     before running mode (start failed, clean exit, aborted startup); None to continue into cron."""
     from gateway.run import (_discover_gateway_mcp_tools, _resolve_gateway_exit_verdict,
                              _shutdown_gateway_health_export, _shutdown_mcp_servers_nonblocking)
@@ -651,7 +651,19 @@ async def _start_gateway_run_runner(runner, _signal_initiated_shutdown: list) ->
         # configured MCP server is slow or unreachable.  discover_mcp_tools() uses a blocking 120s wait
         # internally; calling it from the loop thread would freeze platform heartbeats (Discord shard,
         # Telegram polling) until it returned. See #16856.
-        await _discover_gateway_mcp_tools(runner.config)
+        # Slow optional servers across multiplexed profiles must not gate local readiness.
+        import asyncio
+
+        async def _bg_mcp_discovery():
+            try:
+                await _discover_gateway_mcp_tools(runner.config)
+                logger.info("MCP tool discovery finished in background")
+            except Exception:
+                logger.warning("MCP tool discovery failed in background", exc_info=True)
+
+        task = asyncio.create_task(_bg_mcp_discovery(), name="gateway-mcp-discovery")
+        runner._background_tasks.add(task)
+        task.add_done_callback(runner._background_tasks.discard)
     except Exception:
         logger.debug("MCP tool discovery failed (non-fatal)", exc_info=True)
 
