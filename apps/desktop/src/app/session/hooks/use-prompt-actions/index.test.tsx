@@ -3946,7 +3946,7 @@ describe('usePromptActions submit session-context isolation (#54527)', () => {
     setSessions(() => [])
   })
 
-  it('aborts submit when the user switches sessions during session.resume (no misroute)', async () => {
+  it('finishes submit on the original target when the user switches during session.resume', async () => {
     // Exact #54527 failure: user submits in Session A while its runtime binding
     // is gone; before resume returns they switch to Session B. Without a pinned
     // context the resumed runtime id belongs to B and A's text lands in the
@@ -3969,7 +3969,7 @@ describe('usePromptActions submit session-context isolation (#54527)', () => {
         selectedStoredSessionIdRef.current = STORED_SESSION_B
         activeSessionIdRef.current = RUNTIME_SESSION_B
 
-        return { session_id: RUNTIME_SESSION_B } as never
+        return { session_id: 'rt-resumed-a' } as never
       }
 
       return {} as never
@@ -3993,13 +3993,9 @@ describe('usePromptActions submit session-context isolation (#54527)', () => {
     await waitFor(() => expect(calls.some(c => c.method === 'session.resume')).toBe(true))
     releaseResume()
 
-    expect(await submitting).toBe(false)
-    expect(calls.some(c => c.method === 'prompt.submit')).toBe(false)
-    expect(calls.find(c => c.method === 'session.resume')?.params).toEqual({
-      session_id: STORED_SESSION_A,
-      source: 'desktop',
-      omit_messages: true
-    })
+    expect(await submitting).toBe(true)
+    expect(calls.find(c => c.method === 'prompt.submit')?.params).toMatchObject({ session_id: 'rt-resumed-a' })
+    expect(calls.find(c => c.method === 'session.resume')?.params).toMatchObject({ session_id: STORED_SESSION_A })
   })
 
   it('does not false-positive-abort when the session has rotated via compression (lineage root vs tip)', async () => {
@@ -4096,7 +4092,7 @@ describe('usePromptActions submit session-context isolation (#54527)', () => {
     expect(calls.some(c => c.method === 'prompt.submit')).toBe(true)
   })
 
-  it('aborts recovery submit when the user switches sessions during timeout resume', async () => {
+  it('finishes recovery against the original stored target after the view changes', async () => {
     const calls: { method: string; params?: Record<string, unknown> }[] = []
     let submitAttempts = 0
 
@@ -4121,7 +4117,7 @@ describe('usePromptActions submit session-context isolation (#54527)', () => {
         })
         selectedStoredSessionIdRef.current = STORED_SESSION_B
 
-        return { session_id: RUNTIME_SESSION_B } as never
+        return { session_id: 'rt-recovered-a' } as never
       }
 
       return {} as never
@@ -4143,9 +4139,10 @@ describe('usePromptActions submit session-context isolation (#54527)', () => {
     await waitFor(() => expect(calls.some(c => c.method === 'session.resume')).toBe(true))
     releaseResume()
 
-    expect(await submitting).toBe(false)
-    expect(submitAttempts).toBe(1)
-    expect(calls.filter(c => c.method === 'prompt.submit')).toHaveLength(1)
+    expect(await submitting).toBe(true)
+    expect(submitAttempts).toBe(2)
+    expect(calls.filter(c => c.method === 'prompt.submit')[1]?.params).toMatchObject({ session_id: 'rt-recovered-a' })
+    expect(calls.filter(c => c.method === 'prompt.submit')).toHaveLength(2)
     expect(calls.find(c => c.method === 'session.resume')?.params).toMatchObject({
       session_id: STORED_SESSION_A
     })
@@ -4252,7 +4249,7 @@ describe('usePromptActions submit session-context isolation (#54527)', () => {
     })
   })
 
-  it('aborts when the user switches sessions during the tail of a successful create', async () => {
+  it('finishes a new chat kickoff without adopting the switched-to view', async () => {
     // createBackendSessionForSend awaits once more (armed-YOLO apply) AFTER
     // committing the refs and returning a real id, so a switch in that window
     // escapes its internal null-return drift check. The active ref is the
@@ -4296,8 +4293,10 @@ describe('usePromptActions submit session-context isolation (#54527)', () => {
     )
     await waitFor(() => expect(handle).not.toBeNull())
 
-    expect(await handle!.submitText('message that must not land in session B')).toBe(false)
-    expect(calls.some(c => c.method === 'prompt.submit')).toBe(false)
+    expect(await handle!.submitText('message that must not land in session B')).toBe(true)
+    expect(calls.find(c => c.method === 'prompt.submit')?.params).toMatchObject({ session_id: 'rt-new-chat' })
+    expect(activeSessionIdRef.current).toBe(RUNTIME_SESSION_B)
+    expect(selectedStoredSessionIdRef.current).toBe(STORED_SESSION_B)
   })
 })
 
@@ -4504,12 +4503,12 @@ describe('usePromptActions new-chat first-send delivery (#63078)', () => {
     routeToken = '/sidebar-target::'
     releaseAttach()
 
-    expect(await submitting).toBe(false)
+    expect(await submitting).toBe(true)
     expect(selectedStoredSessionIdRef.current).toBe(NEW_STORED_ID)
-    expect(calls.some(call => call.method === 'prompt.submit')).toBe(false)
+    expect(calls.find(call => call.method === 'prompt.submit')?.params).toMatchObject({ session_id: NEW_RUNTIME_ID })
   })
 
-  it('still aborts when the user genuinely switches chats after create, during attachment sync (#62805)', async () => {
+  it('delivers to the created chat when the user switches during attachment sync', async () => {
     // The post-create re-baseline (adopting the created chat as the pinned
     // target) must not mask a REAL switch later in the pipeline: the user
     // clicks a different session after createBackendSessionForSend lands but
@@ -4590,8 +4589,8 @@ describe('usePromptActions new-chat first-send delivery (#63078)', () => {
     routeToken = '/stored-other-session::'
     releaseFileAttach()
 
-    expect(await submitting).toBe(false)
-    expect(calls.some(c => c.method === 'prompt.submit')).toBe(false)
+    expect(await submitting).toBe(true)
+    expect(calls.find(c => c.method === 'prompt.submit')?.params).toMatchObject({ session_id: NEW_RUNTIME_ID })
   })
 })
 
@@ -4709,7 +4708,7 @@ describe('usePromptActions busy-gateway churn tolerance (#64327)', () => {
     await waitFor(() => expect(handle).not.toBeNull())
 
     expect(await handle!.submitText('deliver despite lagging local publication')).toBe(true)
-    expect(resumeStoredSession).toHaveBeenCalledOnce()
+    expect(resumeStoredSession).not.toHaveBeenCalled()
     expect(calls).toEqual([
       {
         method: 'session.resume',
@@ -4816,7 +4815,7 @@ describe('usePromptActions busy-gateway churn tolerance (#64327)', () => {
     expect(runtimeIdByStoredSessionIdRef.current).toEqual(new Map())
   })
 
-  it('still aborts when the user genuinely moves to a different chat mid-submit', async () => {
+  it('delivers to the original chat when the user moves away mid-submit', async () => {
     // The churn tolerance must not weaken the real guard: selection AND route
     // moving to another actual chat is a user switch and must abort.
     let releaseResume: () => void = () => {}
@@ -4864,8 +4863,9 @@ describe('usePromptActions busy-gateway churn tolerance (#64327)', () => {
     routeToken = '/stored-other-chat::'
     releaseResume()
 
-    expect(await submitting).toBe(false)
-    expect(calls.some(c => c.method === 'prompt.submit')).toBe(false)
+    expect(await submitting).toBe(true)
+    expect(calls.find(c => c.method === 'prompt.submit')?.params).toMatchObject({ session_id: RESUMED_RUNTIME_ID })
+    expect(selectedStoredSessionIdRef.current).toBe('stored-other-chat')
   })
 })
 

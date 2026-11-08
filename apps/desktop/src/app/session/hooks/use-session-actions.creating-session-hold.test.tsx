@@ -58,15 +58,19 @@ describe('createBackendSessionForSend creatingSessionRef hold (#66057)', () => {
   })
 
   function GuardHarness({
+    continueAfterNavigation,
     creatingSessionRef,
     navigate,
+    onComposerScopeAssigned,
     onReady,
     requestGateway,
     routeId,
     selectedStoredSessionIdRef
   }: {
+    continueAfterNavigation?: boolean
     creatingSessionRef: MutableRefObject<boolean>
     navigate: (...args: never[]) => unknown
+    onComposerScopeAssigned?: (scope: string) => void
     onReady: (create: () => Promise<string | null>) => void
     requestGateway: <T>(method: string, params?: Record<string, unknown>) => Promise<T>
     routeId: null | string
@@ -95,8 +99,8 @@ describe('createBackendSessionForSend creatingSessionRef hold (#66057)', () => {
     })
 
     useEffect(() => {
-      onReady(() => actions.createBackendSessionForSend())
-    }, [actions, onReady])
+      onReady(() => actions.createBackendSessionForSend(null, { continueAfterNavigation, onComposerScopeAssigned }))
+    }, [actions, continueAfterNavigation, onComposerScopeAssigned, onReady])
 
     return null
   }
@@ -246,6 +250,46 @@ describe('createBackendSessionForSend creatingSessionRef hold (#66057)', () => {
       />
     )
     expect(creatingSessionRef.current).toBe(false)
+  })
+
+  it('keeps a submitted create after switching chats without navigating back or closing it', async () => {
+    const { $sessions, setActiveSessionId, $activeSessionId } = await import('@/store/session')
+    const creatingSessionRef = { current: false }
+    const selectedStoredSessionIdRef = { current: null as string | null }
+    const navigate = vi.fn()
+    const onComposerScopeAssigned = vi.fn()
+    let finishCreate!: (value: { session_id: string; stored_session_id: string }) => void
+
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'session.create') {
+        return new Promise(resolve => { finishCreate = resolve }) as never
+      }
+
+      return {} as never
+    })
+
+    let create: (() => Promise<string | null>) | null = null
+    render(<GuardHarness continueAfterNavigation creatingSessionRef={creatingSessionRef} navigate={navigate}
+      onComposerScopeAssigned={onComposerScopeAssigned} onReady={fn => (create = fn)} requestGateway={requestGateway}
+      routeId={null} selectedStoredSessionIdRef={selectedStoredSessionIdRef} />)
+    await waitFor(() => expect(create).not.toBeNull())
+    let pending!: Promise<string | null>
+    act(() => { pending = create!() })
+    await waitFor(() => expect(finishCreate).toBeTypeOf('function'))
+    selectedStoredSessionIdRef.current = 'stored-b'
+    setActiveSessionId('runtime-b')
+    await act(async () => {
+      finishCreate({ session_id: 'runtime-submitted', stored_session_id: 'stored-submitted' })
+      expect(await pending).toBe('runtime-submitted')
+    })
+    expect(requestGateway.mock.calls.some(([method]) => method === 'session.close')).toBe(false)
+    expect(navigate).not.toHaveBeenCalled()
+    expect(selectedStoredSessionIdRef.current).toBe('stored-b')
+    expect($activeSessionId.get()).toBe('runtime-b')
+    expect(creatingSessionRef.current).toBe(false)
+    expect(onComposerScopeAssigned).toHaveBeenCalledExactlyOnceWith('stored-submitted')
+    expect($sessions.get().some(session => session.id === 'stored-submitted')).toBe(true)
+    setActiveSessionId(null)
   })
 
   it('clears creatingSessionRef via safety timeout if the route never catches up', async () => {

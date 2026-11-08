@@ -124,7 +124,6 @@ import {
   openSessionTile,
   patchSessionTile,
   publishSessionState,
-  releaseSessionOwnerHold,
   type SessionTileWorkspaceScope,
   type TileDock
 } from '@/store/session-states'
@@ -155,6 +154,7 @@ import { singleFlightSessionResume } from '../use-prompt-actions/single-flight-r
 import { branchThroughRowId } from './branch-boundary'
 import { branchCreateKey } from './branch-create-key'
 import type { SessionCreateOverrides } from './create-overrides'
+import { finishOffscreenCreate } from './created-offscreen'
 import { markSessionCreatedThisRun, sessionCreatedThisRun } from './created-this-run'
 import { captureDisplayHydration } from './display-hydration'
 import { reconcilePersistedLiveTurn } from './persisted-live-turn'
@@ -691,24 +691,10 @@ export function useSessionActions({
         })
 
         if (drift) {
-          console.warn('[submit-drift-abort]', drift, { phase: 'mid-create' })
-
-          // Close on the backend that minted the session: the ambient socket
-          // is a different machine/profile for a routed create and would
-          // 4001 while the orphan lives on (and later ws-orphan-reaps) there.
-          const closeCreated = capturedRoute
-            ? requestGatewayForAgent(capturedRoute.connectionId, capturedRoute.profile, 'session.close', {
-                session_id: created.session_id
-              })
-            : requestGateway('session.close', { session_id: created.session_id })
-
-          await closeCreated.catch(() => undefined)
-
-          if (stored) {
-            releaseSessionOwnerHold(stored)
-          }
-
-          return null
+          return finishOffscreenCreate({
+            capturedRoute, created, createIntent, createIntentRef, createOverrides, drift,
+            ensureSessionState, preview, requestGateway, stored, updateSessionState
+          })
         }
 
         resetViewSync()

@@ -397,7 +397,7 @@ export function usePromptActions({
       const storedSessionId =
         options.storedSessionId !== undefined ? options.storedSessionId : selectedStoredSessionIdRef.current
 
-      const targetIsForeground = storedSessionId === selectedStoredSessionIdRef.current
+      const targetIsForeground = () => storedSessionId === selectedStoredSessionIdRef.current
 
       const uploadRequest =
         options.requestGateway ??
@@ -419,7 +419,7 @@ export function usePromptActions({
 
         // Only a foreground send may retarget the foreground: a background
         // drain that recovers its own session must not steal the view.
-        if (targetIsForeground) {
+        if (targetIsForeground()) {
           activeSessionIdRef.current = recoveredId
           setActiveSessionId(recoveredId)
         }
@@ -468,7 +468,7 @@ export function usePromptActions({
           })
 
           // Update-only: never resurrect a chip the user removed mid-upload.
-          if (updateComposerAttachments) {
+          if (updateComposerAttachments && targetIsForeground()) {
             if (original.occurrenceId) {
               // Preserve a preview that may have completed after staging began,
               // while still refusing a remove + re-add of the same path.

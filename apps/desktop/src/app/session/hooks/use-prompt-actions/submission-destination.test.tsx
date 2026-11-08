@@ -1,4 +1,4 @@
-import { act, cleanup, renderHook } from '@testing-library/react'
+import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { en } from '@/i18n/en'
@@ -48,7 +48,7 @@ function setup() {
     selectedStoredSessionIdRef,
     busyRef,
     copy: en.desktop,
-    createBackendSessionForSend: vi.fn(async () => null),
+    createBackendSessionForSend: vi.fn(async (): Promise<string | null> => null),
     getRoutedStoredSessionId: () => null,
     getRuntimeIdForStoredSession: () => 'runtime-a',
     getRouteToken: () => 'same-route',
@@ -98,6 +98,80 @@ describe('submission intent destinations', () => {
     expect(retained[0]).toMatchObject({ id: original.submission_id, params: original })
     await act(async () => { expect(await a.result.current('same text', { submission_id: String(original.submission_id) })).toBe(true) })
     expect(first.requestGateway.mock.calls.filter(call => call[0] === 'prompt.submit')[1][1]).toEqual(original)
+  })
+
+  it('finishes a captured send when the user switches chats during attachment staging', async () => {
+    const { deps } = setup()
+
+    const scope = {
+      readAttachments: () => [], removeAttachments: vi.fn(), patchAttachment: vi.fn(),
+      setMessages: vi.fn(), setBusy: vi.fn(), setAwaitingResponse: vi.fn()
+    }
+
+    const attached = deferred<{ attachments: []; sessionId: string }>()
+    deps.syncAttachmentsForSubmit.mockImplementationOnce(() => attached.promise)
+    const { result } = renderHook(() => useSubmitPrompt({ ...deps, scope }))
+    let sending!: Promise<boolean>
+    act(() => { sending = result.current('keep this in A') })
+    await waitFor(() => expect(deps.syncAttachmentsForSubmit).toHaveBeenCalled())
+
+    deps.activeSessionIdRef.current = 'runtime-b'
+    deps.selectedStoredSessionIdRef.current = 'stored-b'
+    deps.busyRef.current = true
+    scope.setMessages.mockClear()
+    scope.setBusy.mockClear()
+    scope.setAwaitingResponse.mockClear()
+    await act(async () => {
+      attached.resolve({ attachments: [], sessionId: 'runtime-a' })
+      expect(await sending).toBe(true)
+    })
+
+    expect(deps.requestGateway).toHaveBeenCalledWith('prompt.submit', expect.objectContaining({
+      session_id: 'runtime-a', text: 'keep this in A'
+    }), expect.any(Number))
+    expect(scope.setMessages).not.toHaveBeenCalled()
+    expect(scope.setBusy).not.toHaveBeenCalled()
+    expect(scope.setAwaitingResponse).not.toHaveBeenCalled()
+    expect(deps.busyRef.current).toBe(true)
+  })
+
+  it('finishes a fresh-chat send without adopting the chat the user switched to', async () => {
+    const { deps } = setup()
+
+    const scope = {
+      readAttachments: () => [], removeAttachments: vi.fn(), patchAttachment: vi.fn(),
+      setMessages: vi.fn(), setBusy: vi.fn(), setAwaitingResponse: vi.fn()
+    }
+
+    deps.activeSessionIdRef.current = null
+    deps.selectedStoredSessionIdRef.current = null
+    const created = deferred<string | null>()
+    deps.createBackendSessionForSend.mockImplementationOnce(() => created.promise)
+    const { result } = renderHook(() => useSubmitPrompt({ ...deps, scope }))
+    let sending!: Promise<boolean>
+    act(() => { sending = result.current('new chat kickoff') })
+    await waitFor(() => expect(deps.createBackendSessionForSend).toHaveBeenCalled())
+
+    deps.activeSessionIdRef.current = 'runtime-b'
+    deps.selectedStoredSessionIdRef.current = 'stored-b'
+    deps.busyRef.current = true
+    scope.setMessages.mockClear()
+    scope.setBusy.mockClear()
+    scope.setAwaitingResponse.mockClear()
+    await act(async () => {
+      created.resolve('runtime-new')
+      expect(await sending).toBe(true)
+    })
+
+    expect(deps.requestGateway).toHaveBeenCalledWith('prompt.submit', expect.objectContaining({
+      session_id: 'runtime-new', text: 'new chat kickoff'
+    }), expect.any(Number))
+    expect(deps.activeSessionIdRef.current).toBe('runtime-b')
+    expect(deps.selectedStoredSessionIdRef.current).toBe('stored-b')
+    expect(scope.setMessages).not.toHaveBeenCalled()
+    expect(scope.setBusy).not.toHaveBeenCalled()
+    expect(scope.setAwaitingResponse).not.toHaveBeenCalled()
+    expect(deps.busyRef.current).toBe(true)
   })
 
   it('stages canonical images on the captured owner without a legacy image RPC', async () => {

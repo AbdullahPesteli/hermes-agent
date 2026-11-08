@@ -658,7 +658,10 @@ describe('usePromptActions sleep/wake session recovery', () => {
     const selectedStoredSessionIdRef: MutableRefObject<string | null> = { current: null }
     let boundRuntimeId: string | null = null
     const createBackendSessionForSend = vi.fn(async () => 'brand-new-session-WRONG')
-    const requestGateway = vi.fn(async () => ({}) as never)
+
+    const requestGateway = vi.fn(async (method: string) =>
+      (method === 'session.resume' ? { session_id: RECOVERED_SESSION_ID } : {}) as never
+    )
 
     const resumeStoredSession = vi.fn(async (storedSessionId: string) => {
       expect(storedSessionId).toBe(STORED_SESSION_ID)
@@ -685,7 +688,8 @@ describe('usePromptActions sleep/wake session recovery', () => {
     )
 
     expect(await handle!.submitText('follow-up while the profile route is rebinding')).toBe(true)
-    expect(resumeStoredSession).toHaveBeenCalledWith(STORED_SESSION_ID)
+    expect(resumeStoredSession).not.toHaveBeenCalled()
+    expect(requestGateway).toHaveBeenCalledWith('session.resume', expect.objectContaining({ session_id: STORED_SESSION_ID }))
     expect(createBackendSessionForSend).not.toHaveBeenCalled()
     expect(requestGateway).toHaveBeenCalledWith(
       'prompt.submit',
@@ -702,7 +706,10 @@ describe('usePromptActions sleep/wake session recovery', () => {
     const activeSessionIdRef: MutableRefObject<string | null> = { current: 'rt-wrong-profile' }
     const selectedStoredSessionIdRef: MutableRefObject<string | null> = { current: 'stored-wrong-profile' }
     let boundRuntimeId: string | null = null
-    const requestGateway = vi.fn(async () => ({}) as never)
+
+    const requestGateway = vi.fn(async (method: string) =>
+      (method === 'session.resume' ? { session_id: RECOVERED_SESSION_ID } : {}) as never
+    )
 
     const resumeStoredSession = vi.fn(async () => {
       selectedStoredSessionIdRef.current = STORED_SESSION_ID
@@ -728,7 +735,7 @@ describe('usePromptActions sleep/wake session recovery', () => {
     )
 
     expect(await handle!.submitText('stay in the routed profile session')).toBe(true)
-    expect(resumeStoredSession).toHaveBeenCalledWith(STORED_SESSION_ID)
+    expect(resumeStoredSession).not.toHaveBeenCalled()
     expect(requestGateway).toHaveBeenCalledWith(
       'prompt.submit',
       {
@@ -780,7 +787,14 @@ describe('usePromptActions sleep/wake session recovery', () => {
     let boundRuntimeId: string | null = null
 
     const createBackendSessionForSend = vi.fn(async () => 'brand-new-session-WRONG')
-    const requestGateway = vi.fn(async () => ({}) as never)
+
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'session.resume') {
+        return (recoverySucceeds ? { session_id: RECOVERED_SESSION_ID } : {}) as never
+      }
+
+      return {} as never
+    })
 
     const resumeStoredSession = vi.fn(async () => {
       if (!recoverySucceeds) {
@@ -814,7 +828,7 @@ describe('usePromptActions sleep/wake session recovery', () => {
     expect(await handle!.submitText('do not fork me')).toBe(false)
     expect(busyRef.current).toBe(false)
     expect($messages.get()).toEqual([])
-    expect(resumeStoredSession).toHaveBeenCalledWith(STORED_SESSION_ID)
+    expect(resumeStoredSession).not.toHaveBeenCalled()
     expect(createBackendSessionForSend).not.toHaveBeenCalled()
     expect(requestGateway).not.toHaveBeenCalledWith('prompt.submit', expect.anything(), expect.anything())
 
